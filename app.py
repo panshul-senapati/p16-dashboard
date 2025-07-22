@@ -25,14 +25,22 @@ repo_map = {
 selected_lib = st.sidebar.selectbox("📦 Select Library:", list(repo_map.keys()))
 owner, repo = repo_map[selected_lib]
 
-# Date Range Filter
+# Date Range Filter with separate inputs for start and end dates
 today = date.today()
 default_start = today - timedelta(days=180)
-start_date, end_date = st.sidebar.date_input(
-    "📅 Select Date Range:",
-    [default_start, today],
+
+start_date = st.sidebar.date_input(
+    "📅 Select Start Date:",
+    default_start,
     min_value=date(2010, 1, 1),
-    max_value=today
+    max_value=today,
+)
+
+end_date = st.sidebar.date_input(
+    "📅 Select End Date:",
+    today,
+    min_value=start_date,
+    max_value=today,
 )
 
 # ----------------------------
@@ -63,8 +71,8 @@ downloads_df = load_and_parse_csv("data/github_downloads.csv", "downloads")
 # FILTERING
 # ----------------------------
 if all([not df.empty for df in [stars_df, forks_df, prs_df, downloads_df]]):
-    from_date = pd.to_datetime(start_date[0])
-    to_date = pd.to_datetime(start_date[1]) if len(start_date) > 1 else pd.to_datetime(start_date[0])
+    from_date = pd.to_datetime(start_date)
+    to_date = pd.to_datetime(end_date)
 
     def filter_df(df):
         return df[(df["date"] >= from_date) & (df["date"] <= to_date)]
