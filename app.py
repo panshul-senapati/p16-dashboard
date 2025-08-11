@@ -235,6 +235,78 @@ else:
     st.error(" One or more input CSV files are missing, empty, or invalid.")
 
 # ----------------------------
+# DEPENDENCIES FUNCTION
+# ----------------------------
+def get_dependencies(owner, repo):
+    possible_files = ["requirements.txt", "environment.yml", "package.json"]
+    dependencies = []
+
+    for file in possible_files:
+        url = f"https://api.github.com/repos/{owner}/{repo}/contents/{file}"
+        res = requests.get(url, headers=HEADERS)
+        if res.status_code == 200:
+            content_data = res.json()
+            if content_data.get("encoding") == "base64":
+                import base64
+                decoded = base64.b64decode(content_data["content"]).decode("utf-8")
+                if file == "package.json":
+                    import json
+                    try:
+                        package_json = json.loads(decoded)
+                        deps = package_json.get("dependencies", {})
+                        dependencies = [{"Dependency": k, "Version": v} for k, v in deps.items()]
+                    except json.JSONDecodeError:
+                        st.warning("Invalid package.json format.")
+                else:  # Python-based (requirements.txt or environment.yml)
+                    for line in decoded.splitlines():
+                        if line.strip() and not line.startswith("#"):
+                            if "==" in line:
+                                pkg, ver = line.split("==", 1)
+                                dependencies.append({"Dependency": pkg.strip(), "Version": ver.strip()})
+                            else:
+                                dependencies.append({"Dependency": line.strip(), "Version": "N/A"})
+                break  # stop after finding the first valid file
+    return pd.DataFrame(dependencies)
+
+# DEPENDENTS USING github-dependents-info
+# ----------------------------
+import subprocess
+import json
+
+st.markdown("## 🔗 Public GitHub Dependents")
+
+try:
+    full_repo = f"{owner}/{repo}"
+    result = subprocess.run(
+        ["github-dependents-info", "--repo", full_repo, "--json"],
+        capture_output=True,
+        text=True,
+        check=True
+    )
+    output_data = json.loads(result.stdout)
+    dependents = output_data.get("all_public_dependent_repos", [])
+    if dependents:
+        df_dependents = pd.DataFrame(dependents)[["name", "stars"]]
+        df_sorted = df_dependents.sort_values(by="stars", ascending=False)
+
+        counts = {
+            "Below 100 stars": (df_sorted["stars"] < 100).sum(),
+            "100 to 1000 stars": ((df_sorted["stars"] >= 100) & (df_sorted["stars"] <= 1000)).sum(),
+            "1000+ stars": (df_sorted["stars"] > 1000).sum()
+        }
+
+        final_df = pd.DataFrame(list(counts.items()), columns=["Star Range", "Library Count"])
+        st.dataframe(df_sorted, use_container_width=True)
+        fig_dep = px.bar(final_df, x="Star Range", y="Library Count", title="Dependents by Star Range",
+                         template="plotly_white")
+        st.plotly_chart(fig_dep, use_container_width=True)
+    else:
+        st.info("ℹ️ No public dependents found.")
+except subprocess.CalledProcessError as e:
+    st.error("❌ Failed to run `github-dependents-info`. Is it installed?")
+except json.JSONDecodeError:
+    st.error("❌ Failed to parse JSON output from `github-dependents-info`.")
+# ----------------------------
 # HIDE STREAMLIT DEFAULT UI
 # ----------------------------
 hide_st_style = """

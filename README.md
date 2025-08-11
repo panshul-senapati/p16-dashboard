@@ -1,68 +1,78 @@
-# 📊 GitHub Analytics Dashboard for pandas-dev/pandas
-
-This project is a Streamlit-based interactive dashboard that visualizes real-time GitHub repository data (stars, forks, pull requests, downloads, etc.) for the [`pandas-dev/pandas`](https://github.com/pandas-dev/pandas) repository using GitHub's GraphQL API. It provides data analysts, developers, and open-source contributors with intuitive insights into project popularity and contributions over time.
-
----
-
-## 🔧 Features
-
-- ✅ Fetches real-time data from GitHub using GraphQL API
-- 📈 Visualizes stars, forks, pull requests, and download trends
-- 🗓️ Custom date-range selection for dynamic filtering
-- ⚡ Efficient data caching using `st.cache_data` for faster reloads
-- 🎨 Responsive and interactive UI built with Streamlit and Plotly
-
----
-
-## 📂 Project Structure
-
-p16_dashboard/
-├── app.py # Main Streamlit app
-├── graphql.py # GraphQL utility functions for GitHub API
-├── data/ # Contains CSVs for stars, forks, PRs, downloads
-├── assets/ # (Optional) Images, logos, or static files
-├── requirements.txt # Python dependencies
-└── README.md # Project documentation
-
-
----
-
-## 🚀 How to Run
-
-### 1. Clone the Repository
-
-```bash
-git clone https://github.com/panshul-senapati/p16-dashboard.git
-cd p16-dashboard
-2. Set up Python Environment
-python3 -m venv env
-source env/bin/activate  # On Windows: env\Scripts\activate
-3. Install Dependencies
+📊 GitHub Dependents Analysis
+Analyze public dependent repositories of a given GitHub repository, categorize them by star count, and visualize the results.
+🚀 Overview
+This project uses the github-dependents-info CLI tool to:
+Fetch public dependent repositories of any GitHub repository.
+Extract repository name and stars.
+Categorize repositories based on star ranges.
+Output results in both table format and graphical visualization.
+Example use case:
+"How popular are projects that depend on tslearn-team/tslearn?"
+🛠 Features
+📥 Fetch dependents for any GitHub repository.
+📊 Categorize into:
+Below 100 stars
+100 to 1000 stars
+1000+ stars
+📈 Bar chart visualization for better insights.
+💾 Pandas DataFrame output for further processing.
+📂 Project Structure
+📦 github-dependents-analysis
+ ┣ 📜 main.py         # Main script
+ ┣ 📜 requirements.txt # Dependencies
+ ┗ 📜 README.md       # Documentation
+🔧 Installation
+1️⃣ Clone the Repository
+git clone https://github.com/your-username/github-dependents-analysis.git
+cd github-dependents-analysis
+2️⃣ Install Dependencies
 pip install -r requirements.txt
-4. Add GitHub Personal Access Token
-Create a .env file and add your GitHub token:
+3️⃣ Install github-dependents-info CLI Tool
+npm install -g github-dependents-info
+▶️ Usage
+Run the script:
+python main.py
+Example Output (Table)
+       Star Range   Library Count
+0  Below 100 stars           240
+1  100 to 1000 stars          32
+2  1000+ stars                5
+Example Output (Bar Graph)
+The script generates a bar chart:
+X-axis: Star Ranges
+Y-axis: Number of Libraries
+📜 Code Example
+import subprocess
+import json
+import pandas as pd
+import matplotlib.pyplot as plt
 
-GITHUB_TOKEN=your_personal_access_token
-Tip: Create a token at https://github.com/settings/tokens with repo and read:packages scopes.
-5. Run the App
-streamlit run app.py
-📊 Sample Visualizations
+result = subprocess.run(
+    ["github-dependents-info", "--repo", "tslearn-team/tslearn", "--json"],
+    capture_output=True,
+    text=True
+)
 
-⭐ Stars and forks over time (line charts)
-🔀 Pull requests by month (bar charts)
-📥 Monthly download counts (bar + line combo)
-📅 Date range selector for dynamic analysis
-🛠️ Built With
+data = json.loads(result.stdout)
+df = pd.DataFrame(data["all_public_dependent_repos"])[["name", "stars"]]
+df_sorted = df.sort_values(by="stars")
 
-Python
-Streamlit
-Plotly
-Pandas
-GitHub GraphQL API
-🧰 Developer Tools
+counts = {
+    "Below 100 stars": ((df_sorted["stars"] < 100)).sum(),
+    "100 to 1000 stars": ((df_sorted["stars"] >= 100) & (df_sorted["stars"] <= 1000)).sum(),
+    "1000+ stars": (df_sorted["stars"] > 1000).sum()
+}
 
-Visual Studio Code
-Git & GitHub
-virtualenv
-Streamlit CLI
-API testing tools (e.g., Postman)
+final_df = pd.DataFrame(list(counts.items()), columns=["Star Range", "Library Count"])
+print(final_df)
+
+# Visualization
+plt.bar(final_df["Star Range"], final_df["Library Count"], color="skyblue")
+plt.xlabel("Star Range")
+plt.ylabel("Number of Libraries")
+plt.title("Dependent Repositories by Star Range")
+plt.show()
+📌 Notes
+You must have Node.js installed for github-dependents-info.
+Large repositories with thousands of dependents may take longer to fetch.
+This script works for public repositories only.
