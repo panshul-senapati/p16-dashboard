@@ -3,14 +3,13 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 from datetime import date, timedelta
-import requests
+from data_manager import DataManager
 import time
 
 # ----------------------------
 # CONFIGURE GITHUB TOKEN (FROM ENV VARIABLE ONLY)
 # ----------------------------
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", None)
-HEADERS = {"Authorization": f"token {GITHUB_TOKEN}"} if GITHUB_TOKEN else {}
 
 # ----------------------------
 # PAGE CONFIGURATION
@@ -24,288 +23,347 @@ st.title("📊 GitHub Insights Dashboard")
 st.sidebar.header("📁 Library Info & Filter")
 
 repo_map = {
-    "pandas": ("pandas-dev", "pandas"),
-    "scikit-learn": ("scikit-learn", "scikit-learn"),
-    "matplotlib": ("matplotlib", "matplotlib"),
-    "tensorflow": ("tensorflow", "tensorflow"),
+    "Skrub": ("skrub-data", "skrub"),
+    "Scikit-learn": ("scikit-learn", "scikit-learn"),
 }
 selected_lib = st.sidebar.selectbox(" Select Library:", list(repo_map.keys()))
 owner, repo = repo_map[selected_lib]
 
 today = date.today()
-default_start = today - timedelta(days=180)
+# Set default to cover more historical data since we have data from 2018
+default_start = date(2018, 1, 1)
 
 start_date = st.sidebar.date_input(" Select Start Date:", default_start, min_value=date(2010, 1, 1), max_value=today)
 end_date = st.sidebar.date_input(" Select End Date:", today, min_value=start_date, max_value=today)
 
 # ----------------------------
-# LOAD CSV FUNCTION
+# LOAD CSV FUNCTION (decouple fetch from date changes)
 # ----------------------------
-@st.cache_data
-def load_and_parse_csv(path, expected_col):
-    if not os.path.exists(path):
-        st.warning(f"⚠️ File not found: {path}")
-        return pd.DataFrame(columns=["date", expected_col])
-    df = pd.read_csv(path)
-    if "date" not in df.columns or expected_col not in df.columns:
-        st.error(f"⚠️ The file {path} must contain 'date' and '{expected_col}' columns.")
-        return pd.DataFrame(columns=["date", expected_col])
-    df["date"] = pd.to_datetime(df["date"], errors='coerce')
-    df.dropna(subset=["date"], inplace=True)
-    return df
+@st.cache_data(show_spinner=False)
+def get_data(owner: str, repo: str, force_refresh: bool = False):
+    dm = DataManager(data_dir="data", refresh_threshold_hours=24)
+    if force_refresh:
+        # Fetch all metrics
+        types_to_fetch = ["stars", "forks", "prs", "downloads", "issues", "contributions"]
+        result = {}
+        
+        for metric_type in types_to_fetch:
+            try:
+                if hasattr(dm, "get_data"):
+                    metric_data = dm.get_data(metric_type, owner, repo, force_refresh=True)
+                    result[metric_type] = metric_data
+                else:
+                    # Fallback to manual fetch
+                    if metric_type == "stars":
+                        result[metric_type] = dm.fetcher.stars_fetcher.fetch(owner, repo)
+                    elif metric_type == "forks":
+                        result[metric_type] = dm.fetcher.forks_fetcher.fetch(owner, repo)
+                    elif metric_type == "prs":
+                        result[metric_type] = dm.fetcher.prs_fetcher.fetch(owner, repo)
+                    elif metric_type == "downloads":
+                        result[metric_type] = dm.fetcher.downloads_fetcher.fetch(owner, repo)
+                    elif metric_type == "issues":
+                        result[metric_type] = dm.fetcher.issues_fetcher.fetch(owner, repo)
+                    elif metric_type == "contributions":
+                        result[metric_type] = dm.fetcher.contributions_fetcher.fetch(owner, repo)
+            except Exception as e:
+                # Log error but don't crash - return empty DataFrame with correct schema
+                print(f"Warning: Error fetching {metric_type}: {e}")
+                if metric_type == "stars":
+                    result[metric_type] = pd.DataFrame(columns=["date", "stars"])
+                elif metric_type == "forks":
+                    result[metric_type] = pd.DataFrame(columns=["date", "forks"])
+                elif metric_type == "prs":
+                    result[metric_type] = pd.DataFrame(columns=["date", "pr_count"])
+                elif metric_type == "downloads":
+                    result[metric_type] = pd.DataFrame(columns=["date", "downloads"])
+                elif metric_type == "issues":
+                    result[metric_type] = pd.DataFrame(columns=["date", "issues"])
+                elif metric_type == "contributions":
+                    result[metric_type] = pd.DataFrame(columns=["date", "commits"])
+        
+        return result
+    
+    # Smart data loading: check what's available and what needs fetching
+    loader = dm.loader
+    types_to_load = ["stars", "forks", "prs", "downloads", "issues", "contributions"]
+    result = {}
+    
+    # Check if we have GitHub token for real data
+    has_github_token = bool(os.getenv("GITHUB_TOKEN"))
+    
+    # Check each metric and load from cache if available
+    for metric_type in types_to_load:
+        try:
+            cached_data = loader.get_for(metric_type, owner, repo)
+            if not cached_data.empty:
+                result[metric_type] = cached_data
+            else:
+                # If no cached data and we have GitHub token, try to fetch real data
+                if has_github_token and hasattr(dm, "get_data"):
+                    try:
+                        result[metric_type] = dm.get_data(metric_type, owner, repo, force_refresh=True)
+                        print(f"✅ Fetched real {metric_type} data from GitHub API")
+                    except Exception as api_error:
+                        print(f"⚠️ GitHub API failed for {metric_type}: {api_error}")
+                        # Fall back to manual fetch
+                        if metric_type == "stars":
+                            result[metric_type] = dm.fetcher.stars_fetcher.fetch(owner, repo)
+                        elif metric_type == "forks":
+                            result[metric_type] = dm.fetcher.forks_fetcher.fetch(owner, repo)
+                        elif metric_type == "prs":
+                            result[metric_type] = dm.fetcher.prs_fetcher.fetch(owner, repo)
+                        elif metric_type == "downloads":
+                            result[metric_type] = dm.fetcher.downloads_fetcher.fetch(owner, repo)
+                        elif metric_type == "issues":
+                            result[metric_type] = dm.fetcher.issues_fetcher.fetch(owner, repo)
+                        elif metric_type == "contributions":
+                            result[metric_type] = dm.fetcher.contributions_fetcher.fetch(owner, repo)
+                else:
+                    # No GitHub token, use manual fetch
+                    if metric_type == "stars":
+                        result[metric_type] = dm.fetcher.stars_fetcher.fetch(owner, repo)
+                    elif metric_type == "forks":
+                        result[metric_type] = dm.fetcher.forks_fetcher.fetch(owner, repo)
+                    elif metric_type == "prs":
+                        result[metric_type] = dm.fetcher.prs_fetcher.fetch(owner, repo)
+                    elif metric_type == "downloads":
+                        result[metric_type] = dm.fetcher.downloads_fetcher.fetch(owner, repo)
+                    elif metric_type == "issues":
+                        result[metric_type] = dm.fetcher.issues_fetcher.fetch(owner, repo)
+                    elif metric_type == "contributions":
+                        result[metric_type] = dm.fetcher.contributions_fetcher.fetch(owner, repo)
+        except Exception as e:
+            # Log error but don't crash - return empty DataFrame with correct schema
+            print(f"Warning: Error fetching {metric_type}: {e}")
+            if metric_type == "stars":
+                result[metric_type] = pd.DataFrame(columns=["date", "stars"])
+            elif metric_type == "forks":
+                result[metric_type] = pd.DataFrame(columns=["date", "forks"])
+            elif metric_type == "prs":
+                result[metric_type] = pd.DataFrame(columns=["date", "pr_count"])
+            elif metric_type == "downloads":
+                result[metric_type] = pd.DataFrame(columns=["date", "downloads"])
+            elif metric_type == "issues":
+                result[metric_type] = pd.DataFrame(columns=["date", "issues"])
+            elif metric_type == "contributions":
+                result[metric_type] = pd.DataFrame(columns=["date", "commits"])
+    
+    return result
 
 # ----------------------------
 # GITHUB RELEASE DOWNLOAD FUNCTION
 # ----------------------------
-def get_release_downloads(owner, repo):
-    url = f"https://api.github.com/repos/{owner}/{repo}/releases"
-    response = requests.get(url, headers=HEADERS)
-    if response.status_code != 200:
-        st.warning(f"Failed to fetch releases: Status {response.status_code}")
-        return pd.DataFrame()
-    releases = response.json()
-    downloads_data = []
-    for release in releases:
-        tag = release.get("tag_name", "N/A")
-        for asset in release.get("assets", []):
-            downloads_data.append({
-                "Release": tag,
-                "Asset": asset.get("name", "unknown"),
-                "Downloads": asset.get("download_count", 0),
-                "Uploaded": asset.get("created_at", "")[:10]
-            })
-    return pd.DataFrame(downloads_data)
+def to_plotly_xy(df: pd.DataFrame, x_col: str, y_col: str):
+    if df.empty:
+        return [], []
+    return df[x_col].tolist(), df[y_col].tolist()
 
 # ----------------------------
 # GITHUB CONTRIBUTIONS FUNCTION
 # ----------------------------
-def get_weekly_contributions(owner, repo):
-    url = f"https://api.github.com/repos/{owner}/{repo}/stats/contributors"
-    retry = 0
-    while retry < 10:
-        response = requests.get(url, headers=HEADERS)
-        if response.status_code == 202:
-            time.sleep(3)
-            retry += 1
-        else:
-            break
-    if response.status_code != 200:
-        st.warning(f"Failed to fetch contributions: Status {response.status_code}")
-        return pd.DataFrame()
-    data = response.json()
-    rows = []
-    for contributor in data:
-        for week in contributor["weeks"]:
-            rows.append({
-                "week": pd.to_datetime(week["w"], unit="s"),
-                "commits": week["c"]
-            })
-    df = pd.DataFrame(rows)
+def summarize_total(df: pd.DataFrame, y_col: str) -> int:
     if df.empty:
-        return df
-    return df.groupby("week", as_index=False)["commits"].sum()
+        return 0
+    return int(df[y_col].sum())
 
 # ----------------------------
 # GITHUB ISSUES FUNCTION
 # ----------------------------
-def get_issues_over_time(owner, repo):
-    issues = []
-    page = 1
-    while True:
-        url = f"https://api.github.com/repos/{owner}/{repo}/issues?state=all&per_page=100&page={page}"
-        response = requests.get(url, headers=HEADERS)
-        if response.status_code != 200:
-            st.warning(f"Issues API failed with status {response.status_code}")
-            break
-        page_data = response.json()
-        if not page_data:
-            break
-        for issue in page_data:
-            if "pull_request" not in issue:
-                issues.append({"created_at": issue.get("created_at", "")})
-        page += 1
-        if page > 10:
-            break
-    df = pd.DataFrame(issues)
+def filter_by_date(df: pd.DataFrame, start_d: date, end_d: date, date_col: str = "date") -> pd.DataFrame:
     if df.empty:
         return df
-    df["date"] = pd.to_datetime(df["created_at"]).dt.tz_localize(None).dt.normalize()
-    return df.groupby("date").size().reset_index(name="issue_count")
+    # Convert date column to datetime if it's not already
+    df_copy = df.copy()
+    df_copy[date_col] = pd.to_datetime(df_copy[date_col], errors="coerce")
+    df_copy = df_copy.dropna(subset=[date_col])
+    
+    # Convert start and end dates to datetime
+    start_dt = pd.to_datetime(start_d)
+    end_dt = pd.to_datetime(end_d)
+    
+    # Filter by date range
+    mask = (df_copy[date_col] >= start_dt) & (df_copy[date_col] <= end_dt)
+    return df_copy.loc[mask]
 
 # ----------------------------
 # LOAD DATA
 # ----------------------------
-stars_df = load_and_parse_csv("data/github_stars.csv", "stars")
-forks_df = load_and_parse_csv("data/github_forks.csv", "forks")
-prs_df = load_and_parse_csv("data/github_pull_requests.csv", "pr_count")
-downloads_df = load_and_parse_csv("data/github_downloads.csv", "downloads")
-contributions_df = get_weekly_contributions(owner, repo)
-issues_df = get_issues_over_time(owner, repo)
+st.sidebar.markdown("---")
+
+# GitHub API Configuration
+github_token = os.getenv("GITHUB_TOKEN")
+
+if github_token:
+    st.sidebar.success("🔑 GitHub API authenticated")
+    os.environ["GITHUB_TOKEN"] = github_token
+else:
+    st.sidebar.warning("⚠️ No GitHub token found. Set GITHUB_TOKEN environment variable for real data.")
+    st.sidebar.info("💡 Create token at: GitHub.com → Settings → Developer settings → Personal access tokens")
+
+use_graphql = st.sidebar.checkbox("Use GitHub GraphQL for stars/forks/PRs/issues", value=True)
+os.environ["P16_USE_GRAPHQL"] = "1" if use_graphql else "0"
+
+
+
+refresh = st.sidebar.button("🔄 Refresh Data")
+
+data_map = get_data(owner, repo, force_refresh=refresh)
+
+# Fallback: if downloads are empty (common when no GitHub release assets),
+# use PyPI metrics for the selected library/package if available
+if data_map.get("downloads", pd.DataFrame()).empty:
+    try:
+        pypi_path = os.path.join("data", "pypi_metrics.csv")
+        if os.path.exists(pypi_path):
+            pypi_df = pd.read_csv(pypi_path)
+            if {"date", "library", "downloads"}.issubset(set(pypi_df.columns)):
+                pypi_df = pypi_df[pypi_df["library"] == repo][["date", "downloads"]].copy()
+                pypi_df["date"] = pd.to_datetime(pypi_df["date"], errors="coerce")
+                pypi_df = pypi_df.dropna(subset=["date"]).sort_values("date")
+                data_map["downloads"] = pypi_df
+    except Exception:
+        pass
+stars_df = data_map.get("stars", pd.DataFrame(columns=["date", "stars"]))
+forks_df = data_map.get("forks", pd.DataFrame(columns=["date", "forks"]))
+prs_df = data_map.get("prs", pd.DataFrame(columns=["date", "pr_count"]))
+downloads_df = data_map.get("downloads", pd.DataFrame(columns=["date", "downloads"]))
+issues_df = data_map.get("issues", pd.DataFrame(columns=["date", "issues"]))
+contribs_df = data_map.get("contributions", pd.DataFrame(columns=["date", "commits"]))
 
 # ----------------------------
-# FILTERING AND DISPLAY
+# FILTERING AND DISPLAY (always reflect selected date range)
 # ----------------------------
-if all([not df.empty for df in [stars_df, forks_df, prs_df, downloads_df]]):
-    from_date = pd.to_datetime(start_date)
-    to_date = pd.to_datetime(end_date)
+from_date = start_date
+to_date = end_date
 
-    def filter_df(df, date_col="date"):
-        return df[(df[date_col] >= from_date) & (df[date_col] <= to_date)]
 
-    filtered_stars = filter_df(stars_df)
-    filtered_forks = filter_df(forks_df)
-    filtered_prs = filter_df(prs_df)
-    filtered_downloads = filter_df(downloads_df)
 
-    st.subheader(f"📊 Summary for {owner}/{repo}")
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Total Stars", int(filtered_stars["stars"].sum()))
-    col2.metric("Total Forks", int(filtered_forks["forks"].sum()))
-    col3.metric("Total PRs", int(filtered_prs["pr_count"].sum()))
-    col4.metric("Total Downloads", int(filtered_downloads["downloads"].sum()))
+filtered_stars = filter_by_date(stars_df, from_date, to_date)
+filtered_forks = filter_by_date(forks_df, from_date, to_date)
+filtered_prs = filter_by_date(prs_df, from_date, to_date)
+filtered_downloads = filter_by_date(downloads_df, from_date, to_date)
+filtered_issues = filter_by_date(issues_df, from_date, to_date)
+filtered_contribs = filter_by_date(contribs_df, from_date, to_date)
 
-    col1, col2 = st.columns(2)
-    with col1:
-        fig_stars = px.line(filtered_stars, x="date", y="stars", title=" Stars Over Time",
+
+
+st.subheader(f"📊 Summary for {owner}/{repo}")
+
+
+
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Total Stars", summarize_total(filtered_stars, "stars"))
+col2.metric("Total Forks", summarize_total(filtered_forks, "forks"))
+col3.metric("Total PRs", summarize_total(filtered_prs, "pr_count"))
+col4.metric("Total Downloads", summarize_total(filtered_downloads, "downloads"))
+col5, col6 = st.columns(2)
+with col5:
+    st.metric("Total Issues (opened)", summarize_total(filtered_issues, "issues"))
+with col6:
+    st.metric("Total Commits", summarize_total(filtered_contribs, "commits"))
+
+col1, col2 = st.columns(2)
+with col1:
+    if filtered_stars.empty:
+        st.info("No stars data in selected range.")
+    else:
+        x, y = to_plotly_xy(filtered_stars, "date", "stars")
+        fig_stars = px.line(x=x, y=y, title=" Stars Over Time",
                             markers=True, template="plotly_white", color_discrete_sequence=["#FFD700"])
         st.plotly_chart(fig_stars, use_container_width=True)
 
-    with col2:
-        fig_forks = px.line(filtered_forks, x="date", y="forks", title=" Forks Over Time",
+with col2:
+    if filtered_forks.empty:
+        st.info("No forks data in selected range.")
+    else:
+        x, y = to_plotly_xy(filtered_forks, "date", "forks")
+        fig_forks = px.line(x=x, y=y, title=" Forks Over Time",
                             markers=True, template="plotly_white", color_discrete_sequence=["#1f77b4"])
         st.plotly_chart(fig_forks, use_container_width=True)
 
-    col3, col4 = st.columns(2)
-    with col3:
-        fig_prs = px.line(filtered_prs, x="date", y="pr_count", title=" Pull Requests Over Time",
+col3, col4 = st.columns(2)
+with col3:
+    if filtered_prs.empty:
+        st.info("No PR data in selected range.")
+    else:
+        x, y = to_plotly_xy(filtered_prs, "date", "pr_count")
+        fig_prs = px.line(x=x, y=y, title=" Pull Requests Over Time",
                           markers=True, template="plotly_white", color_discrete_sequence=["#FF7F0E"])
         st.plotly_chart(fig_prs, use_container_width=True)
 
-    with col4:
-        release_df = get_release_downloads(owner, repo)
-        if not release_df.empty:
-            fig_release = px.bar(release_df, x="Asset", y="Downloads", color="Release",
-                                 title=" GitHub Asset Downloads per Release", text="Downloads",
-                                 labels={"Downloads": "Download Count"})
-            st.plotly_chart(fig_release, use_container_width=True)
-        else:
-            st.info("ℹ️ No GitHub release assets with downloads found.")
-
-    # CONTRIBUTIONS
-    if not contributions_df.empty:
-        filtered_contributions = contributions_df[
-            (contributions_df["week"] >= from_date) &
-            (contributions_df["week"] <= to_date)
-        ]
-        if filtered_contributions.empty:
-            st.info("ℹ️ No contribution data found in selected range.")
-        else:
-            contrib_fig = px.line(filtered_contributions, x="week", y="commits",
-                                  title=" Weekly Contributions (Commits)", markers=True,
-                                  template="plotly_white", color_discrete_sequence=["#2ca02c"])
-            st.plotly_chart(contrib_fig, use_container_width=True)
+with col4:
+    if filtered_downloads.empty:
+        st.info("No downloads data in selected range.")
     else:
-        st.info("ℹ️ No contribution data found.")
+        x, y = to_plotly_xy(filtered_downloads, "date", "downloads")
+        fig_downloads = px.line(x=x, y=y, title=" Downloads Over Time",
+                                markers=True, template="plotly_white", color_discrete_sequence=["#2E8B57"])
+        st.plotly_chart(fig_downloads, use_container_width=True)
 
-    # ISSUES
-    if not issues_df.empty:
-        filtered_issues = issues_df[
-            (issues_df["date"] >= from_date) &
-            (issues_df["date"] <= to_date)
-        ]
-        if filtered_issues.empty:
-            st.info("ℹ️ No issues data found in selected range.")
-        else:
-            issues_fig = px.line(filtered_issues, x="date", y="issue_count",
-                                 title=" Issues Over Time", markers=True,
-                                 template="plotly_white", color_discrete_sequence=["#d62728"])
-            st.plotly_chart(issues_fig, use_container_width=True)
+col7, col8 = st.columns(2)
+with col7:
+    if filtered_issues.empty:
+        st.info("No issues data in selected range.")
     else:
-        st.info("ℹ️ No issues data found.")
+        x, y = to_plotly_xy(filtered_issues, "date", "issues")
+        fig_issues = px.line(x=x, y=y, title=" Issues Opened Over Time",
+                             markers=True, template="plotly_white", color_discrete_sequence=["#8A2BE2"])
+        st.plotly_chart(fig_issues, use_container_width=True)
 
-    # DOWNLOAD BUTTONS
-    st.markdown("###  Download Filtered Data")
-    d1, d2, d3, d4 = st.columns(4)
-    d1.download_button("⬇️ Stars CSV", filtered_stars.to_csv(index=False), file_name="filtered_stars.csv")
-    d2.download_button("⬇️ Forks CSV", filtered_forks.to_csv(index=False), file_name="filtered_forks.csv")
-    d3.download_button("⬇️ PRs CSV", filtered_prs.to_csv(index=False), file_name="filtered_prs.csv")
-    d4.download_button("⬇️ Downloads CSV", filtered_downloads.to_csv(index=False), file_name="filtered_downloads.csv")
+with col8:
+    if filtered_contribs.empty:
+        st.info("No commits data in selected range.")
+    else:
+        x, y = to_plotly_xy(filtered_contribs, "date", "commits")
+        fig_commits = px.line(x=x, y=y, title=" Commits Over Time",
+                              markers=True, template="plotly_white", color_discrete_sequence=["#2ca02c"])
+        st.plotly_chart(fig_commits, use_container_width=True)
 
-else:
-    st.error(" One or more input CSV files are missing, empty, or invalid.")
+# DOWNLOAD BUTTON (single, merged by date and filtered by selection)
+st.markdown("###  Download Filtered Data")
 
-# ----------------------------
-# DEPENDENCIES FUNCTION
-# ----------------------------
-def get_dependencies(owner, repo):
-    possible_files = ["requirements.txt", "environment.yml", "package.json"]
-    dependencies = []
+# Ensure all date columns are datetime before merging
+def ensure_datetime(df, col_name="date"):
+    if not df.empty and col_name in df.columns:
+        # Create a copy to avoid SettingWithCopyWarning
+        df_copy = df.copy()
+        df_copy[col_name] = pd.to_datetime(df_copy[col_name], errors="coerce")
+        df_copy = df_copy.dropna(subset=[col_name])
+        return df_copy
+    return df
 
-    for file in possible_files:
-        url = f"https://api.github.com/repos/{owner}/{repo}/contents/{file}"
-        res = requests.get(url, headers=HEADERS)
-        if res.status_code == 200:
-            content_data = res.json()
-            if content_data.get("encoding") == "base64":
-                import base64
-                decoded = base64.b64decode(content_data["content"]).decode("utf-8")
-                if file == "package.json":
-                    import json
-                    try:
-                        package_json = json.loads(decoded)
-                        deps = package_json.get("dependencies", {})
-                        dependencies = [{"Dependency": k, "Version": v} for k, v in deps.items()]
-                    except json.JSONDecodeError:
-                        st.warning("Invalid package.json format.")
-                else:  # Python-based (requirements.txt or environment.yml)
-                    for line in decoded.splitlines():
-                        if line.strip() and not line.startswith("#"):
-                            if "==" in line:
-                                pkg, ver = line.split("==", 1)
-                                dependencies.append({"Dependency": pkg.strip(), "Version": ver.strip()})
-                            else:
-                                dependencies.append({"Dependency": line.strip(), "Version": "N/A"})
-                break  # stop after finding the first valid file
-    return pd.DataFrame(dependencies)
-
-# DEPENDENTS USING github-dependents-info
-# ----------------------------
-import subprocess
-import json
-
-st.markdown("## 🔗 Public GitHub Dependents")
+# Convert all filtered DataFrames to have consistent datetime columns
+filtered_stars = ensure_datetime(filtered_stars)
+filtered_forks = ensure_datetime(filtered_forks)
+filtered_prs = ensure_datetime(filtered_prs)
+filtered_downloads = ensure_datetime(filtered_downloads)
+filtered_issues = ensure_datetime(filtered_issues)
+filtered_contribs = ensure_datetime(filtered_contribs)
 
 try:
-    full_repo = f"{owner}/{repo}"
-    result = subprocess.run(
-        ["github-dependents-info", "--repo", full_repo, "--json"],
-        capture_output=True,
-        text=True,
-        check=True
+    # Merge all DataFrames on date column
+    merged = filtered_stars.merge(filtered_forks, on="date", how="outer")
+    merged = merged.merge(filtered_prs, on="date", how="outer")
+    merged = merged.merge(filtered_downloads, on="date", how="outer")
+    merged = merged.merge(filtered_issues, on="date", how="outer")
+    merged = merged.merge(filtered_contribs, on="date", how="outer")
+    
+    # Sort by date and fill missing values
+    merged = merged.sort_values("date").fillna(0)
+    
+    # Download button
+    st.download_button(
+        "⬇️ Download CSV (Selected Range)",
+        merged.to_csv(index=False),
+        file_name=f"{owner}_{repo}_metrics_{start_date}_to_{end_date}.csv",
     )
-    output_data = json.loads(result.stdout)
-    dependents = output_data.get("all_public_dependent_repos", [])
-    if dependents:
-        df_dependents = pd.DataFrame(dependents)[["name", "stars"]]
-        df_sorted = df_dependents.sort_values(by="stars", ascending=False)
+    
+except Exception as e:
+    st.error(f"❌ Error creating merged CSV: {str(e)}")
+    st.info("💡 Try refreshing the data first to ensure all metrics are loaded properly.")
 
-        counts = {
-            "Below 100 stars": (df_sorted["stars"] < 100).sum(),
-            "100 to 1000 stars": ((df_sorted["stars"] >= 100) & (df_sorted["stars"] <= 1000)).sum(),
-            "1000+ stars": (df_sorted["stars"] > 1000).sum()
-        }
-
-        final_df = pd.DataFrame(list(counts.items()), columns=["Star Range", "Library Count"])
-        st.dataframe(df_sorted, use_container_width=True)
-        fig_dep = px.bar(final_df, x="Star Range", y="Library Count", title="Dependents by Star Range",
-                         template="plotly_white")
-        st.plotly_chart(fig_dep, use_container_width=True)
-    else:
-        st.info("ℹ️ No public dependents found.")
-except subprocess.CalledProcessError as e:
-    st.error("❌ Failed to run `github-dependents-info`. Is it installed?")
-except json.JSONDecodeError:
-    st.error("❌ Failed to parse JSON output from `github-dependents-info`.")
+# Extra sections remain removed for simplicity
 # ----------------------------
 # HIDE STREAMLIT DEFAULT UI
 # ----------------------------
